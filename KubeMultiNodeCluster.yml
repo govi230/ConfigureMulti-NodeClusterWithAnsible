@@ -1,0 +1,172 @@
+- name: "Same Configuration For Master and Slave Node"
+  hosts: all
+  vars:
+          - dockerurl: 'http://download.docker.com/linux/centos/7/x86_64/stable/'
+          - kubeadmurl: 'https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64'
+  tasks:
+          - name: "Disable swap space"
+            command: swapoff -a
+          - name: 'Mount dvd in /dvd directory and disable swap'
+            copy:
+                    src: 'rc.local'
+                    dest: '/etc/rc.d/rc.local'
+          - name: 'Make executable abouve file'
+            file:
+                    path: '/etc/rc.d/rc.local'
+                    mode: 'a+x'
+          - name: "Yum configuration for Docker"
+            yum_repository:
+                    name: "docker"
+                    description: "Docker yum repo"
+                    baseurl: "{{ dockerurl }}"
+                    gpgcheck: no
+          - name: "Yum configuration for Kubeadm , kubelet and kubectl"
+            yum_repository:
+                    name: "kubeadm"
+                    description: "kubernetes"
+                    baseurl: "{{ kubeadmurl }}"
+                    gpgcheck: yes
+                    enabled: yes
+                    gpgkey: 
+                        - 'https://packages.cloud.google.com/yum/doc/yum-key.gpg'
+                        - 'https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg'
+                    repo_gpgcheck: yes
+                    exclude:
+                           - 'kubeadm'
+                           - 'kubectl'
+                           - 'kubelet'
+          - name: "Install docker-ce , kubeadm , kubelet and kubectl"
+            yum:
+                    name: 
+                        - "docker-ce-18.09.1-3.el7.x86_64"
+                        - "kubeadm"
+                        - "kubelet"
+                        - "kubectl"
+                        - "iproute-tc"
+                    state: present
+                    disable_excludes: 'kubeadm'
+          - name: "Starting docker service permanent"
+            service:
+                    name: "docker"
+                    state: started
+                    enabled: yes
+          - name: "Starting kubelet service"
+            service:
+                    name: "docker"
+                    state: started
+                    enabled: yes
+          - name: "Config daemon.json for docker cgroup driver(systemd)"
+            copy:
+                    src: 'daemon.json'
+                    dest: '/etc/docker/daemon.json'
+          - name: "Daemon reload"
+            systemd:
+                    daemon_reload: yes
+          - name: "Sysctl ip6tables entry"
+            sysctl:
+                    name: 'net.bridge.bridge-nf-call-ip6tables'
+                    value: '1'
+                    state: present
+                    reload: yes
+          - name: "Sysctl iptables entry"
+            sysctl:
+                    name: 'net.bridge.bridge-nf-call-iptables'
+                    value: '1'
+                    state: present
+                    reload: yes
+          - name: "Install python 3"
+            package:
+                    name: 'python3'
+          - name: "Install docker-py python library(SDK for docker)"
+            pip: 
+                    name: "docker"
+          - name: "Disable permanently SELinux"
+            selinux:
+                    state: permissive
+                    policy: targeted 
+          - name: "Allow rules for Docker"
+            firewalld:
+                    masquerade: yes
+                    zone: public
+                    permanent: yes
+                    state: enabled
+          - name: "Allow kubelet 10250 port on Managed Node"
+            firewalld:
+                    zone: public
+                    port: '10250/tcp'
+                    permanent: yes
+                    state: enabled
+          - name: "Restart firewalld"
+            service:
+                    name:  "firewalld"
+                    state: restarted
+          - name: "Restart Docker service"
+            service:
+                    name: "docker"
+                    state: restarted
+          - name: "Telling hosts names to all nodes"
+            copy:
+                    src: 'hosts'
+                    dest: '/etc/hosts'
+
+- name: "Set host name for slave1 192.168.43.146"
+  hosts: 192.168.43.146
+  vars:
+          - host: "slave1"
+  tasks:
+          - name: "Set host name"
+            hostname:
+                  name: "{{ host }}"
+
+
+- name: "Slave Configuration"
+  hosts: slave
+  tasks:
+          - name: "Allow Kube Shedular 10251 port on Slave Node"
+            firewalld:
+                    zone: public
+                    port: '10251/tcp'
+                    permanent: yes
+                    state: enabled
+          - name: "Allow Kube Controller 10252 port on Slave Node"
+            firewalld:
+                    zone: public
+                    port: '10252/tcp'
+                    permanent: yes
+                    state: enabled
+          - name: "Restart firewall"
+            service:
+                    name: "firewalld"
+                    state: restarted
+
+
+- name: "Master Configuration"
+  hosts: master
+  vars:
+          - host: "master"
+  tasks:
+          - name: "Set host name"
+            hostname:
+                  name: "{{ host }}"
+          - name: "Allow API server 6443 port on Managed Node"
+            firewalld:
+                    zone: public
+                    port: '6443/tcp'
+                    permanent: yes
+                    state: enabled
+          - name: "Restart firewall"
+            service:
+                    name: "firewalld"
+                    state: restarted
+          - name: "Make Master Node 192.168.43.42"
+            command: kubeadm init --pod-network-cidr=10.10.1.0/16
+            register: x
+          - name: "Make .kube directory"
+            shell: mkdir -p $HOME/.kube
+          - shell: sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+          - shell: sudo chown $(id -u):$(id -g) $HOME/.kube/config
+          - name: "Overlay Flannel setup"
+            shell: kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+          - name: "Give url to master so it give it's slave to connect"
+            debug:
+                    var: x.stdout_lines[-4::]
